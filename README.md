@@ -26,13 +26,6 @@
 3. **Pulizia automatica** — I file PDF originali (fronti e retro) vengono eliminati automaticamente dopo l'elaborazione.
 
 ---
-
-## Screenshot
-
-> *(inserire screenshot dell'interfaccia)*
-
----
-
 ## Requisiti di sistema
 
 | Componente | Versione |
@@ -126,11 +119,8 @@ Vedi [`requirements.txt`](requirements.txt).
 ---
 
 ## Sviluppato da
-
-**Truccolo Angelo Srl**  
-Commercio Rottami in Ferro e Metalli — Rifiuti Riciclabili Non Pericolosi  
-🌐 [truccoloangelo.com](https://truccoloangelo.com)
-
+**Giovanni Pio**
+🌐 [familiarigiovannipio.it](https://familiarigiovannipio.it)
 ---
 
 *Uso interno — software proprietario.*
