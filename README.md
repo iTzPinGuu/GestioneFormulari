@@ -1,7 +1,7 @@
 # 📄 Truccolo Angelo — PDF Tool
 
 <p align="center">
-  <img src="assets/logo.png" alt="Truccolo Angelo Srl" width="220"/>
+  <img src="https://cdn-ikpfegl.nitrocdn.com/AakdWbLrQBXaLlLaoucOtDmmiOQrFVyM/assets/images/optimized/rev-86bef17/www.truccoloangelo.com/wp-content/uploads/2025/06/LOGO-PNG.png"/>
 </p>
 
 <p align="center">
