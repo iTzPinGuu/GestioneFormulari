@@ -14,6 +14,9 @@ from pdf2image import convert_from_path
 from PIL import Image, ImageTk
 import webbrowser
 from pathlib import Path
+import subprocess
+import sys
+
 
 # ─────────────────────────────────────────────
 #  CONFIGURAZIONE GLOBALE
@@ -25,8 +28,40 @@ PATHS = {
 }
 pytesseract.pytesseract.tesseract_cmd = PATHS['tesseract']
 
+
 CONFIG_DIR  = Path.home() / ".truccolotool"
 CONFIG_FILE = CONFIG_DIR / "settings.json"
+
+
+# ─────────────────────────────────────────────
+#  FIX CMD — nasconde TUTTE le finestre console
+#  Patcha pdf2image E pytesseract (entrambi hanno
+#  un riferimento locale a Popen/subprocess)
+# ─────────────────────────────────────────────
+if sys.platform == "win32":
+    _si = subprocess.STARTUPINFO()
+    _si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    _si.wShowWindow = 0  # SW_HIDE
+
+    class _SilentPopen(subprocess.Popen):
+        def __init__(self, *args, **kwargs):
+            kwargs['startupinfo'] = _si
+            kwargs['creationflags'] = (
+                kwargs.get('creationflags', 0) | subprocess.CREATE_NO_WINDOW
+            )
+            super().__init__(*args, **kwargs)
+
+    # Patcha pdf2image (usa "from subprocess import Popen" internamente)
+    import pdf2image.pdf2image as _pdf2image_module
+    _pdf2image_module.Popen = _SilentPopen
+
+    # Patcha pytesseract (usa "subprocess.Popen" tramite il modulo)
+    import pytesseract.pytesseract as _pytesseract_module
+    _pytesseract_module.subprocess.Popen = _SilentPopen
+
+    # Patcha anche subprocess globale come terza sicurezza
+    subprocess.Popen = _SilentPopen
+
 
 # ─────────────────────────────────────────────
 #  PERSISTENZA IMPOSTAZIONI
@@ -41,6 +76,7 @@ def salva_config(data: dict):
     except Exception:
         pass
 
+
 def carica_config() -> dict:
     try:
         if CONFIG_FILE.exists():
@@ -50,17 +86,15 @@ def carica_config() -> dict:
         pass
     return {}
 
+
 # ─────────────────────────────────────────────
 #  UTILITY
 # ─────────────────────────────────────────────
 def nome_casuale(lunghezza=15):
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=lunghezza))
 
+
 def unique_dest_path(folder: str, base_name: str) -> str:
-    """
-    Restituisce un percorso univoco nella cartella.
-    Se 'base_name.pdf' esiste gia', prova 'base_name 2.pdf', 'base_name 3.pdf', ecc.
-    """
     candidate = os.path.join(folder, f"{base_name}.pdf")
     if not os.path.exists(candidate):
         return candidate
@@ -71,18 +105,12 @@ def unique_dest_path(folder: str, base_name: str) -> str:
             return candidate
         counter += 1
 
+
 # ─────────────────────────────────────────────
 #  LOGICA CORE — FRONTE/RETRO + OCR RENTRI
 # ─────────────────────────────────────────────
 def separa_fronte_retro(front_path, back_path, output_folder,
                         log_cb=None, progress_cb=None):
-    """
-    Divide i due PDF (fronti + retro) in coppie singole,
-    rinomina ciascun PDF con il codice RENTRI tramite OCR
-    (o FILE_NON_VALIDO N se non trovato, con incremento corretto),
-    poi elimina gli originali.
-    Restituisce (ok: bool, messaggio: str).
-    """
     try:
         front_reader = PdfReader(front_path)
         back_reader  = PdfReader(back_path)
@@ -96,7 +124,6 @@ def separa_fronte_retro(front_path, back_path, output_folder,
 
         os.makedirs(output_folder, exist_ok=True)
 
-        # Inversione retro: l'ultimo retro corrisponde al primo fronte
         retro_pages = list(back_reader.pages)[::-1]
 
         bbox_map = {
@@ -104,16 +131,12 @@ def separa_fronte_retro(front_path, back_path, output_folder,
             'RENTRI PORTALE': (1197, 72,  1633, 205),
         }
 
-        # Tiene traccia dei nomi gia' usati IN QUESTA sessione
-        # (evita collisioni anche tra file creati nello stesso batch)
         used_names = set()
-        # Pre-carica i nomi gia' presenti nella cartella di output
         for existing in os.listdir(output_folder):
             if existing.lower().endswith('.pdf'):
                 used_names.add(os.path.splitext(existing)[0])
 
         for i in range(n_front):
-            # 1. Crea PDF temporaneo con le 2 pagine
             writer = PdfWriter()
             writer.add_page(front_reader.pages[i])
             writer.add_page(retro_pages[i])
@@ -122,7 +145,6 @@ def separa_fronte_retro(front_path, back_path, output_folder,
             with open(tmp_path, "wb") as f:
                 writer.write(f)
 
-            # 2. OCR sulla prima pagina del temp PDF
             rentri_name = None
             try:
                 images = convert_from_path(tmp_path, first_page=1, last_page=1,
@@ -135,21 +157,19 @@ def separa_fronte_retro(front_path, back_path, output_folder,
                         if match:
                             rentri_name = f"{match.group(1)} {match.group(2)} {match.group(3)}"
                             if log_cb:
-                                log_cb(f"  \u2713 Pag.{i+1} \u2014 RENTRI trovato [{scan_type}]: {rentri_name}", 'ok')
+                                log_cb(f"  ✓ Pag.{i+1} — RENTRI trovato [{scan_type}]: {rentri_name}", 'ok')
                             break
             except Exception as ocr_err:
                 if log_cb:
-                    log_cb(f"  \u26a0 Pag.{i+1} \u2014 OCR fallita: {ocr_err}", 'warn')
+                    log_cb(f"  ⚠ Pag.{i+1} — OCR fallita: {ocr_err}", 'warn')
 
-            # 3. Determina nome finale univoco
             if rentri_name:
                 base_name = rentri_name
             else:
                 base_name = "FILE_NON_VALIDO"
                 if log_cb:
-                    log_cb(f"  \u26a0 Pag.{i+1} \u2014 Codice RENTRI non trovato", 'warn')
+                    log_cb(f"  ⚠ Pag.{i+1} — Codice RENTRI non trovato", 'warn')
 
-            # Risolve collisioni controllando sia disco che nomi gia' usati in batch
             final_name = base_name
             counter = 2
             while final_name in used_names:
@@ -157,7 +177,6 @@ def separa_fronte_retro(front_path, back_path, output_folder,
                 counter += 1
             used_names.add(final_name)
 
-            # 4. Rinomina temp -> nome finale
             dest_path = os.path.join(output_folder, f"{final_name}.pdf")
             os.rename(tmp_path, dest_path)
 
@@ -169,7 +188,6 @@ def separa_fronte_retro(front_path, back_path, output_folder,
             if progress_cb:
                 progress_cb(i + 1, n_front)
 
-        # 5. Elimina gli originali
         deleted = []
         for path in [front_path, back_path]:
             try:
@@ -177,10 +195,10 @@ def separa_fronte_retro(front_path, back_path, output_folder,
                 deleted.append(os.path.basename(path))
             except Exception as del_err:
                 if log_cb:
-                    log_cb(f"  \u26a0 Impossibile eliminare: {os.path.basename(path)} — {del_err}", 'warn')
+                    log_cb(f"  ⚠ Impossibile eliminare: {os.path.basename(path)} — {del_err}", 'warn')
 
         if log_cb and deleted:
-            log_cb(f"\n\U0001f5d1  Originali eliminati: {', '.join(deleted)}", 'info')
+            log_cb(f"\n🗑  Originali eliminati: {', '.join(deleted)}", 'info')
 
         return True, f"Completato: {n_front} PDF creati in:\n{output_folder}"
 
@@ -189,22 +207,20 @@ def separa_fronte_retro(front_path, back_path, output_folder,
 
 
 # ─────────────────────────────────────────────
-#  PALETTE COLORI — match logo Truccolo Angelo
-#  Verde riciclo: #3B7A2B  |  Verde scuro: #2D6020
-#  Grigio testo:  #2D3A3A  |  Bianco: #F5F5F5
+#  PALETTE COLORI
 # ─────────────────────────────────────────────
 C = {
-    'bg':           '#1E2A1E',   # verde notte molto scuro
-    'surface':      '#243024',   # superficie card
-    'surface2':     '#2D3D2D',   # superficie secondaria
-    'surface3':     '#344534',   # hover / selezionato
-    'accent':       '#3B7A2B',   # verde logo principale
-    'accent_light': '#4E9E3A',   # verde chiaro hover
-    'accent_dark':  '#2D5E20',   # verde scuro pressed
-    'green_text':   '#5BBD45',   # verde leggibile su scuro
-    'text':         '#E8F0E8',   # bianco verdognolo
-    'text_muted':   '#8FA88F',   # grigio verde
-    'text_faint':   '#566856',   # grigio verde scuro
+    'bg':           '#1E2A1E',
+    'surface':      '#243024',
+    'surface2':     '#2D3D2D',
+    'surface3':     '#344534',
+    'accent':       '#3B7A2B',
+    'accent_light': '#4E9E3A',
+    'accent_dark':  '#2D5E20',
+    'green_text':   '#5BBD45',
+    'text':         '#E8F0E8',
+    'text_muted':   '#8FA88F',
+    'text_faint':   '#566856',
     'success':      '#5BBD45',
     'warning':      '#D4A017',
     'error':        '#C94040',
@@ -245,7 +261,6 @@ class TruccoloTool(tk.Tk):
         self._load_logo()
         self._update_status()
 
-    # ─── BUILD UI ──────────────────────────────
     def _build_ui(self):
         self._build_header()
         self._build_body()
@@ -255,13 +270,11 @@ class TruccoloTool(tk.Tk):
         hdr = tk.Frame(self, bg=C['surface'], pady=0)
         hdr.pack(fill='x')
 
-        # Linea verde accent in cima
         tk.Frame(hdr, bg=C['accent'], height=4).pack(fill='x')
 
         inner = tk.Frame(hdr, bg=C['surface'], pady=12)
         inner.pack(fill='x')
 
-        # Canvas logo (piu' grande)
         self.logo_canvas = tk.Canvas(inner, width=100, height=72,
                                      bg=C['surface'], highlightthickness=0,
                                      cursor='hand2')
@@ -269,7 +282,6 @@ class TruccoloTool(tk.Tk):
         self.logo_canvas.bind("<Button-1>",
                               lambda e: webbrowser.open("https://truccoloangelo.com"))
 
-        # Titoli
         title_frame = tk.Frame(inner, bg=C['surface'])
         title_frame.pack(side='left', padx=4)
 
@@ -278,7 +290,7 @@ class TruccoloTool(tk.Tk):
                  fg=C['text'], bg=C['surface']).pack(anchor='w')
 
         tk.Label(title_frame,
-                 text="Unione Fronte/Retro  \u00b7  Rinomina RENTRI automatica",
+                 text="Unione Fronte/Retro  ·  Rinomina RENTRI automatica",
                  font=FONT_SMALL, fg=C['green_text'],
                  bg=C['surface']).pack(anchor='w', pady=(1, 0))
 
@@ -286,8 +298,7 @@ class TruccoloTool(tk.Tk):
                  font=FONT_SMALLER, fg=C['text_muted'],
                  bg=C['surface']).pack(anchor='w')
 
-        # Pulsante INFO
-        info_btn = tk.Button(inner, text="\u2139  Info",
+        info_btn = tk.Button(inner, text="ℹ  Info",
                              font=FONT_BTN,
                              fg=C['text'], bg=C['surface2'],
                              activebackground=C['surface3'],
@@ -298,7 +309,6 @@ class TruccoloTool(tk.Tk):
         info_btn.pack(side='right', padx=16)
         self._hover(info_btn, C['surface3'], C['surface2'])
 
-        # Linea separatore
         tk.Frame(hdr, bg=C['border_light'], height=1).pack(fill='x')
 
     def _build_body(self):
@@ -308,11 +318,10 @@ class TruccoloTool(tk.Tk):
         body.columnconfigure(1, weight=6)
         body.rowconfigure(0, weight=1)
 
-        # ── SINISTRA ──
         left = tk.Frame(body, bg=C['bg'])
         left.grid(row=0, column=0, sticky='nsew', padx=(0, 14))
 
-        self._section_label(left, "\U0001f4c4  SELEZIONE FILE")
+        self._section_label(left, "📄  SELEZIONE FILE")
 
         self._file_row(left, "PDF Fronti", self.front_path,
                        lambda: self._pick_file(self.front_path, "Seleziona PDF FRONTI"))
@@ -324,9 +333,8 @@ class TruccoloTool(tk.Tk):
 
         tk.Frame(left, bg=C['bg'], height=22).pack()
 
-        # Pulsante elabora
         self.btn_run = tk.Button(left,
-                                 text="\u25b6  ELABORA PDF",
+                                 text="▶  ELABORA PDF",
                                  font=FONT_BTN_LG,
                                  fg='white', bg=C['accent'],
                                  activebackground=C['accent_dark'],
@@ -338,27 +346,24 @@ class TruccoloTool(tk.Tk):
 
         tk.Frame(left, bg=C['bg'], height=10).pack()
 
-        # Barra progresso (nascosta)
         self.progress_var = tk.IntVar(value=0)
         self.progress_bar = ttk.Progressbar(left,
                                             variable=self.progress_var,
                                             maximum=100,
                                             style='TA.Horizontal.TProgressbar')
 
-        # Status
         self.status_var = tk.StringVar(value="Seleziona i file per iniziare")
         tk.Label(left, textvariable=self.status_var,
                  font=FONT_SMALL, fg=C['text_muted'],
                  bg=C['bg'], wraplength=330,
                  justify='left').pack(anchor='w', pady=(6, 0))
 
-        # ── DESTRA: LOG ──
         right = tk.Frame(body, bg=C['bg'])
         right.grid(row=0, column=1, sticky='nsew')
         right.rowconfigure(1, weight=1)
         right.columnconfigure(0, weight=1)
 
-        self._section_label(right, "\U0001f4cb  LOG ELABORAZIONE")
+        self._section_label(right, "📋  LOG ELABORAZIONE")
 
         log_outer = tk.Frame(right, bg=C['surface'],
                              highlightthickness=1,
@@ -385,7 +390,7 @@ class TruccoloTool(tk.Tk):
         self.log_text.tag_configure('heading', foreground=C['green_text'],
                                     font=('Segoe UI', 9, 'bold'))
 
-        btn_clear = tk.Button(right, text="\U0001f5d1  Svuota log",
+        btn_clear = tk.Button(right, text="🗑  Svuota log",
                               font=FONT_SMALL,
                               fg=C['text_muted'], bg=C['surface'],
                               activebackground=C['surface2'],
@@ -404,7 +409,6 @@ class TruccoloTool(tk.Tk):
                         lightcolor=C['accent_light'],
                         bordercolor=C['border'])
 
-    # ─── WIDGET HELPERS ────────────────────────
     def _section_label(self, parent, text):
         f = tk.Frame(parent, bg=C['bg'])
         f.pack(fill='x', pady=(0, 10))
@@ -417,7 +421,7 @@ class TruccoloTool(tk.Tk):
         row = tk.Frame(parent, bg=C['bg'])
         row.pack(fill='x', pady=5)
 
-        icon = "\U0001f4c1" if is_folder else "\U0001f4c4"
+        icon = "📁" if is_folder else "📄"
         tk.Label(row, text=f"{icon}  {label}",
                  font=FONT_SMALL, fg=C['text_muted'],
                  bg=C['bg'], width=11, anchor='w').pack(side='left')
@@ -431,18 +435,17 @@ class TruccoloTool(tk.Tk):
                                font=FONT_SMALL, fg=C['text_muted'],
                                bg=C['surface'], anchor='w',
                                padx=8, pady=5,
-                               text="\u2014  non selezionato")
+                               text="—  non selezionato")
         display_lbl.pack(fill='x')
 
         def on_change(*_, lbl=display_lbl, v=var):
             p = v.get()
             if not p:
-                lbl.config(text="\u2014  non selezionato",
-                           fg=C['text_muted'])
+                lbl.config(text="—  non selezionato", fg=C['text_muted'])
             else:
                 bn = os.path.basename(p)
                 lbl.config(
-                    text=bn if len(bn) <= 40 else f"\u2026{bn[-38:]}",
+                    text=bn if len(bn) <= 40 else f"…{bn[-38:]}",
                     fg=C['text'])
 
         var.trace_add('write', on_change)
@@ -461,12 +464,10 @@ class TruccoloTool(tk.Tk):
         widget.bind('<Enter>', lambda e: widget.config(bg=color_in))
         widget.bind('<Leave>', lambda e: widget.config(bg=color_out))
 
-    # ─── LOGO ──────────────────────────────────
     def _load_logo(self):
         c = self.logo_canvas
         logo_loaded = False
 
-        # Prova prima il file allegato (nella stessa cartella dello script)
         candidates = [
             PATHS['logo'],
             os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logo.png'),
@@ -486,13 +487,11 @@ class TruccoloTool(tk.Tk):
                 continue
 
         if not logo_loaded:
-            # Fallback SVG-style: icona riciclo + TA
             c.config(width=90, height=68)
             c.create_oval(5, 4, 85, 64, fill=C['accent_dark'], outline=C['accent_light'], width=2)
             c.create_text(45, 34, text="TA", fill='white',
                           font=('Segoe UI', 22, 'bold'))
 
-    # ─── SELEZIONE FILE ────────────────────────
     def _pick_file(self, var, title):
         path = filedialog.askopenfilename(
             title=title, filetypes=[("PDF files", "*.pdf")])
@@ -512,13 +511,12 @@ class TruccoloTool(tk.Tk):
                     bool(self.back_path.get()),
                     bool(self.output_folder.get())])
         if done == 3:
-            self.status_var.set("\u2705 Tutto pronto \u2014 premi ELABORA PDF")
+            self.status_var.set("✅ Tutto pronto — premi ELABORA PDF")
         elif done == 0:
             self.status_var.set("Seleziona i file per iniziare")
         else:
             self.status_var.set(f"Selezione {done}/3 completata...")
 
-    # ─── LOG ───────────────────────────────────
     def _log(self, msg: str, tag: str = ''):
         self.log_text.configure(state='normal')
         self.log_text.insert('end', msg + '\n', tag if tag else ())
@@ -530,7 +528,6 @@ class TruccoloTool(tk.Tk):
         self.log_text.delete('1.0', 'end')
         self.log_text.configure(state='disabled')
 
-    # ─── ELABORAZIONE ──────────────────────────
     def _run(self):
         if self.processing:
             return
@@ -550,7 +547,7 @@ class TruccoloTool(tk.Tk):
 
         self.processing = True
         self.btn_run.config(state='disabled', bg=C['accent_dark'],
-                            text="\u23f3  Elaborazione in corso...")
+                            text="⏳  Elaborazione in corso...")
         self.progress_bar.pack(fill='x')
         self.progress_var.set(0)
 
@@ -571,7 +568,7 @@ class TruccoloTool(tk.Tk):
                 self.after(0, lambda p=pct: self.progress_var.set(p))
                 self.after(0, lambda d=done, t=total:
                            self.status_var.set(
-                               f"\u23f3 Elaborazione: {d} / {t} pagine..."))
+                               f"⏳ Elaborazione: {d} / {t} pagine..."))
 
             ok, msg = separa_fronte_retro(fp, bp, out,
                                           log_cb=on_log,
@@ -580,7 +577,7 @@ class TruccoloTool(tk.Tk):
             def finish():
                 self.processing = False
                 self.btn_run.config(state='normal', bg=C['accent'],
-                                    text="\u25b6  ELABORA PDF")
+                                    text="▶  ELABORA PDF")
                 self.progress_bar.pack_forget()
                 self.progress_var.set(0)
                 self.front_path.set("")
@@ -588,19 +585,18 @@ class TruccoloTool(tk.Tk):
                 self._update_status()
 
                 if ok:
-                    self._log(f"\n\u2705  {msg}", 'ok')
-                    self.status_var.set("\u2705 Elaborazione completata!")
+                    self._log(f"\n✅  {msg}", 'ok')
+                    self.status_var.set("✅ Elaborazione completata!")
                     messagebox.showinfo("Completato", msg)
                 else:
-                    self._log(f"\n\u274c  {msg}", 'err')
-                    self.status_var.set("\u274c Errore \u2014 vedi log")
+                    self._log(f"\n❌  {msg}", 'err')
+                    self.status_var.set("❌ Errore — vedi log")
                     messagebox.showerror("Errore", msg)
 
             self.after(0, finish)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    # ─── FINESTRA INFO ─────────────────────────
     def _show_info(self):
         win = tk.Toplevel(self)
         win.title("Informazioni — PDF Tool")
@@ -609,10 +605,8 @@ class TruccoloTool(tk.Tk):
         win.resizable(False, False)
         win.grab_set()
 
-        # Barra verde in cima
         tk.Frame(win, bg=C['accent'], height=4).pack(fill='x')
 
-        # Logo
         c2 = tk.Canvas(win, width=120, height=86,
                        bg=C['surface'], highlightthickness=0)
         c2.pack(pady=(18, 4))
@@ -640,7 +634,7 @@ class TruccoloTool(tk.Tk):
         tk.Label(win, text="Truccolo Angelo Srl",
                  font=('Segoe UI', 13, 'bold'),
                  fg=C['text'], bg=C['surface']).pack()
-        tk.Label(win, text="PDF Tool \u2014 v2.0",
+        tk.Label(win, text="PDF Tool — v2.0",
                  font=FONT_SMALL, fg=C['green_text'],
                  bg=C['surface']).pack(pady=(2, 12))
 
@@ -648,19 +642,19 @@ class TruccoloTool(tk.Tk):
         box.pack(fill='x', padx=22)
 
         lines = [
-            ("\U0001f4c4  Come funziona", 'head'),
+            ("📄  Come funziona", 'head'),
             ("1. Seleziona il PDF con tutte le pagine FRONTI.", ''),
             ("2. Seleziona il PDF con tutte le pagine RETRO.", ''),
             ("3. Scegli la cartella di output.", ''),
             ("4. Premi ELABORA PDF.", ''),
             ("", ''),
-            ("\U0001f50d  Rinomina automatica RENTRI", 'head'),
+            ("🔍  Rinomina automatica RENTRI", 'head'),
             ("Ogni coppia viene analizzata tramite OCR.", ''),
-            ("Se trovato un codice (es. TRUCC0 123456 IT),", ''),
+            ("Se trovato un codice (es. LZTLX 123456 XX),", ''),
             ("il file viene rinominato con quel codice.", ''),
-            ("Se non trovato \u2192 FILE_NON_VALIDO, FILE_NON_VALIDO 2...", ''),
+            ("Se non trovato → FILE_NON_VALIDO, FILE_NON_VALIDO 2...", ''),
             ("", ''),
-            ("\U0001f5d1  I file originali vengono eliminati", ''),
+            ("🗑  I file originali vengono eliminati", ''),
             ("   automaticamente dopo la separazione.", ''),
         ]
         for text, tag in lines:
